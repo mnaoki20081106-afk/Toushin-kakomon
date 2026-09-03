@@ -19,6 +19,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 
 BASE = "https://www.toshin.com"
 UA = "Mozilla/5.0 (compatible; personal-study-archiver/1.0)"
@@ -170,6 +171,17 @@ def download_center(years, out_dir, delay):
         _extract_and_save_pair(text, url, "listening", year, out_dir, delay)
 
 
+def make_zip(out_dir, zip_path):
+    out_dir = out_dir.rstrip("/")
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _dirs, files in os.walk(out_dir):
+            for fname in files:
+                full = os.path.join(root, fname)
+                arcname = os.path.relpath(full, os.path.dirname(out_dir))
+                zf.write(full, arcname)
+    print(f"ZIP作成: {zip_path}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="東進過去問DB 英語過去問 一括ダウンロード (標準ライブラリのみ)")
     ap.add_argument("--config", default="universities.json")
@@ -181,6 +193,9 @@ def main():
     ap.add_argument("--only", nargs="*", help="大学名の一部で絞り込み（スペース区切りで複数可）")
     ap.add_argument("--skip-kyotsu", action="store_true", help="共通テスト/センター試験を除外")
     ap.add_argument("--skip-universities", action="store_true", help="大学個別過去問を除外")
+    ap.add_argument("--zip", action="store_true", help="完了後にdownloadsフォルダをZIPにまとめる")
+    ap.add_argument("--zip-name", default=None, help="ZIPファイル名（既定: <out>.zip）")
+    ap.add_argument("--zip-only", action="store_true", help="ZIP化後に元のフォルダを削除してZIPだけ残す")
     args = ap.parse_args()
 
     end_year = args.end_year or datetime.date.today().year
@@ -201,6 +216,14 @@ def main():
     if not args.skip_kyotsu:
         download_kyotsutest(years, args.out, args.delay)
         download_center(years, args.out, args.delay)
+
+    if args.zip:
+        zip_path = args.zip_name or f"{args.out.rstrip('/')}.zip"
+        make_zip(args.out, zip_path)
+        if args.zip_only:
+            import shutil
+            shutil.rmtree(args.out)
+            print(f"元フォルダを削除しました: {args.out}")
 
     print("完了しました。")
 
