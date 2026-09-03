@@ -68,13 +68,24 @@ def ext_from_content_type(ct, fallback=".pdf"):
     return {"application/pdf": ".pdf", "text/html": ".html"}.get(ct, fallback)
 
 
-def download_university(code, name, years, out_dir, delay):
+def save_diag(diag_dir, tag, text):
+    if not diag_dir:
+        return
+    os.makedirs(diag_dir, exist_ok=True)
+    path = os.path.join(diag_dir, f"{tag}.html")
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+
+def download_university(code, name, years, out_dir, delay, diag_dir, stats):
     print(f"=== {name} ({code}) ===")
     for year in years:
         url = f"{BASE}/new_kakomon_db/university/{code}/{year}/"
         html, _, _ = fetch(url, delay=delay)
         time.sleep(delay)
         if not html:
+            stats["fetch_errors"] += 1
             continue
         text = html.decode("utf-8", "ignore")
         yy = str(year)[-2:]
@@ -85,6 +96,8 @@ def download_university(code, name, years, out_dir, delay):
         found = pattern.findall(text)
         if not found:
             print(f"  [info] {year}: 取得{len(text)}文字 / 英語リンク一致0件（サイト側の仕様変更やブロックの可能性）")
+            stats["no_match"] += 1
+            save_diag(diag_dir, f"{code}_{year}", text)
             continue
         seen = set()
         for href, kind in found:
@@ -95,13 +108,16 @@ def download_university(code, name, years, out_dir, delay):
             data, _, ct = fetch(BASE + href, delay=delay)
             time.sleep(delay)
             if not data:
+                stats["fetch_errors"] += 1
                 continue
             fname = f"{exam_id}_{kind}{ext_from_content_type(ct)}"
             path = os.path.join(out_dir, name, str(year), fname)
             if safe_write(path, data):
                 print(f"  [ok] {year} {fname}")
+                stats["downloaded"] += 1
             else:
                 print(f"  [skip] {year} {fname} (既存)")
+                stats["skipped_existing"] += 1
 
 
 PDF_LINK_RE = re.compile(r'href="([^"]+\.pdf)"', re.IGNORECASE)
@@ -129,7 +145,7 @@ def resolve_question_pdf(question_url, delay):
     return data, ".html"
 
 
-def _extract_and_save_pair(text, page_url, keyword, year, out_dir, delay):
+def _extract_and_save_pair(text, page_url, keyword, year, out_dir, delay, stats):
     q_pattern = re.compile(rf'href="([^"]*{keyword}[^"]*(?:mondai|question)[^"]*\.html)"')
     m = q_pattern.search(text)
     if m:
@@ -140,6 +156,11 @@ def _extract_and_save_pair(text, page_url, keyword, year, out_dir, delay):
             path = os.path.join(out_dir, "共通テスト・センター試験", fname)
             if safe_write(path, data):
                 print(f"  [ok] {fname}")
+                stats["downloaded"] += 1
+            else:
+                stats["skipped_existing"] += 1
+        else:
+            stats["fetch_errors"] += 1
 
     k_pattern = re.compile(rf'href="([^"]*{keyword}[^"]*\.pdf)"')
     m2 = k_pattern.search(text)
@@ -152,9 +173,14 @@ def _extract_and_save_pair(text, page_url, keyword, year, out_dir, delay):
             path = os.path.join(out_dir, "共通テスト・センター試験", fname)
             if safe_write(path, data):
                 print(f"  [ok] {fname}")
+                stats["downloaded"] += 1
+            else:
+                stats["skipped_existing"] += 1
+        else:
+            stats["fetch_errors"] += 1
 
 
-def download_kyotsutest(years, out_dir, delay):
+def download_kyotsutest(years, out_dir, delay, diag_dir, stats):
     print("=== 共通テスト（英語） ===")
     for year in years:
         if year < 2021:
@@ -163,13 +189,15 @@ def download_kyotsutest(years, out_dir, delay):
         html, _, _ = fetch(url, delay=delay)
         time.sleep(delay)
         if not html:
+            stats["fetch_errors"] += 1
+            save_diag(diag_dir, f"kyotsutest_{year}_failed", "")
             continue
         text = html.decode("utf-8", "ignore")
-        _extract_and_save_pair(text, url, "reading", year, out_dir, delay)
-        _extract_and_save_pair(text, url, "listening", year, out_dir, delay)
+        _extract_and_save_pair(text, url, "reading", year, out_dir, delay, stats)
+        _extract_and_save_pair(text, url, "listening", year, out_dir, delay, stats)
 
 
-def download_center(years, out_dir, delay):
+def download_center(years, out_dir, delay, diag_dir, stats):
     print("=== センター試験（英語） ===")
     for year in years:
         if year > 2020:
@@ -178,10 +206,24 @@ def download_center(years, out_dir, delay):
         html, _, _ = fetch(url, delay=delay)
         time.sleep(delay)
         if not html:
+            stats["fetch_errors"] += 1
+            save_diag(diag_dir, f"center_{year}_failed", "")
             continue
         text = html.decode("utf-8", "ignore")
-        _extract_and_save_pair(text, url, "eigo", year, out_dir, delay)
-        _extract_and_save_pair(text, url, "listening", year, out_dir, delay)
+        _extract_and_save_pair(text, url, "eigo", year, out_dir, delay, stats)
+        _extract_and_save_pair(text, url, "listening", year, out_dir, delay, stats)
+
+
+def selftest(delay):
+    """本番実行の前に、東進サイトへ接続できるか1件だけ確認する。"""
+    url = f"{BASE}/new_kakomon_db/university/0l/{datetime.date.today().year - 1}/"
+    print(f"[selftest] 接続確認中: {url}")
+    data, final_url, ct = fetch(url, delay=delay)
+    if data is None:
+        print("[selftest] 失敗: サイトに接続できませんでした。ネットワーク環境やブロックを確認してください。")
+        return False
+    print(f"[selftest] 成功: {len(data)} bytes 取得 (Content-Type: {ct}, URL: {final_url})")
+    return True
 
 
 def make_zip(out_dir, zip_path):
@@ -209,7 +251,13 @@ def main():
     ap.add_argument("--zip", action="store_true", help="完了後にdownloadsフォルダをZIPにまとめる")
     ap.add_argument("--zip-name", default=None, help="ZIPファイル名（既定: <out>.zip）")
     ap.add_argument("--zip-only", action="store_true", help="ZIP化後に元のフォルダを削除してZIPだけ残す")
+    ap.add_argument("--diag-dir", default="diag", help="0件一致時などの生HTMLを保存するフォルダ（既定: diag、空文字で無効化）")
+    ap.add_argument("--selftest", action="store_true", help="本番実行前に接続確認だけ行って終了する")
     args = ap.parse_args()
+
+    if args.selftest:
+        ok = selftest(args.delay)
+        raise SystemExit(0 if ok else 1)
 
     end_year = args.end_year or datetime.date.today().year
     start_year = args.start_year or (end_year - args.years + 1)
@@ -218,17 +266,20 @@ def main():
     with open(args.config, encoding="utf-8") as f:
         config = json.load(f)
 
+    diag_dir = args.diag_dir or None
+    stats = {"downloaded": 0, "skipped_existing": 0, "fetch_errors": 0, "no_match": 0}
+
     if not args.skip_universities:
         for schools in config.values():
             for school in schools:
                 name, code = school["name"], school["code"]
                 if args.only and not any(q in name for q in args.only):
                     continue
-                download_university(code, name, years, args.out, args.delay)
+                download_university(code, name, years, args.out, args.delay, diag_dir, stats)
 
     if not args.skip_kyotsu:
-        download_kyotsutest(years, args.out, args.delay)
-        download_center(years, args.out, args.delay)
+        download_kyotsutest(years, args.out, args.delay, diag_dir, stats)
+        download_center(years, args.out, args.delay, diag_dir, stats)
 
     if args.zip:
         zip_path = args.zip_name or f"{args.out.rstrip('/')}.zip"
@@ -239,6 +290,14 @@ def main():
             print(f"元フォルダを削除しました: {args.out}")
 
     print("完了しました。")
+    print(
+        f"[summary] 新規ダウンロード: {stats['downloaded']} / "
+        f"既存でスキップ: {stats['skipped_existing']} / "
+        f"取得失敗: {stats['fetch_errors']} / "
+        f"英語リンク0件のページ: {stats['no_match']}"
+    )
+    if diag_dir and stats["no_match"] > 0:
+        print(f"[hint] 0件一致のページのHTMLを {diag_dir}/ に保存しました。サイト構造が変わっていないか確認してください。")
 
 
 if __name__ == "__main__":
