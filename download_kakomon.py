@@ -269,11 +269,15 @@ def main():
     diag_dir = args.diag_dir or None
     stats = {"downloaded": 0, "skipped_existing": 0, "fetch_errors": 0, "no_match": 0}
 
+    def name_matches(name, query):
+        base = name[:-2] if name.endswith("大学") else name
+        return query == name or query == base
+
     if not args.skip_universities:
         for schools in config.values():
             for school in schools:
                 name, code = school["name"], school["code"]
-                if args.only and not any(q in name for q in args.only):
+                if args.only and not any(name_matches(name, q) for q in args.only):
                     continue
                 download_university(code, name, years, args.out, args.delay, diag_dir, stats)
 
