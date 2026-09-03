@@ -22,6 +22,9 @@ import urllib.request
 import zipfile
 
 BASE = "https://www.toshin.com"
+# 大学個別の過去問アーカイブ（university/{code}/{year}/...）は toshin.com とは別ドメインで
+# 配信されている。共通テスト/センター試験ページ（BASE側）とドメインが違う点に注意。
+BASE_KAKOMON = "https://www.toshin-kakomon.com"
 UA = (
     "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
@@ -32,13 +35,14 @@ HEADERS = {
     "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
     "Referer": BASE + "/new_kakomon_db",
 }
+HEADERS_KAKOMON = {**HEADERS, "Referer": BASE_KAKOMON + "/new_kakomon_db/"}
 
 
-def fetch(url, timeout=20, retries=3, delay=1.5):
+def fetch(url, timeout=20, retries=3, delay=1.5, headers=None):
     last_err = None
     for attempt in range(1, retries + 1):
         try:
-            req = urllib.request.Request(url, headers=HEADERS)
+            req = urllib.request.Request(url, headers=headers or HEADERS)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.read(), resp.geturl(), resp.headers.get("Content-Type", "")
         except urllib.error.HTTPError as e:
@@ -81,8 +85,8 @@ def save_diag(diag_dir, tag, text):
 def download_university(code, name, years, out_dir, delay, diag_dir, stats):
     print(f"=== {name} ({code}) ===")
     for year in years:
-        url = f"{BASE}/new_kakomon_db/university/{code}/{year}/"
-        html, _, _ = fetch(url, delay=delay)
+        url = f"{BASE_KAKOMON}/new_kakomon_db/university/{code}/{year}/"
+        html, _, _ = fetch(url, delay=delay, headers=HEADERS_KAKOMON)
         time.sleep(delay)
         if not html:
             stats["fetch_errors"] += 1
@@ -105,7 +109,7 @@ def download_university(code, name, years, out_dir, delay, diag_dir, stats):
                 continue
             seen.add(href)
             exam_id = href.strip("/").split("/")[-2]
-            data, _, ct = fetch(BASE + href, delay=delay)
+            data, _, ct = fetch(BASE_KAKOMON + href, delay=delay, headers=HEADERS_KAKOMON)
             time.sleep(delay)
             if not data:
                 stats["fetch_errors"] += 1
@@ -215,10 +219,10 @@ def download_center(years, out_dir, delay, diag_dir, stats):
 
 
 def selftest(delay):
-    """本番実行の前に、東進サイトへ接続できるか1件だけ確認する。"""
-    url = f"{BASE}/new_kakomon_db/university/0l/{datetime.date.today().year - 1}/"
+    """本番実行の前に、東進過去問DBサイトへ接続できるか1件だけ確認する。"""
+    url = f"{BASE_KAKOMON}/new_kakomon_db/university/0l/{datetime.date.today().year - 1}/"
     print(f"[selftest] 接続確認中: {url}")
-    data, final_url, ct = fetch(url, delay=delay)
+    data, final_url, ct = fetch(url, delay=delay, headers=HEADERS_KAKOMON)
     if data is None:
         print("[selftest] 失敗: サイトに接続できませんでした。ネットワーク環境やブロックを確認してください。")
         return False
