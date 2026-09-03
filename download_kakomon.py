@@ -4,13 +4,14 @@
 標準ライブラリのみで動作します（a-Shell などpipが使いにくい環境向け）。
 実行・ダウンロードは利用者自身の判断と責任で行ってください（利用規約の範囲内で）。
 
-大学別過去問は toshin-kakomon.com の「英語科目まとめページ」を起点にPDFリンクを
-自動収集し、無ければ年度別ページ・問題/解答/解説の個別ページを辿ります
-（サイト構造は変わりうるので、リンクが見つからない場合は都度ログに出します）。
+大学別過去問は toshin-kakomon.com の年度別ページ
+(/new_kakomon_db/university/{code}/{year}/) を年度ごとに取得し、
+英語科目のexam id (e{code}{年の下2桁}NN) を持つ問題/解答/解説リンクを抜き出して
+保存します（東京大学2026年度の実HTMLで構造を確認済み）。
 共通テスト/センター試験は従来どおり toshin.com を参照します。
 
-ネットワーク越しの実サイト確認はこの実行環境からは行えなかったため、
-実際のHTML構造とズレがあればリンク抽出パターンの調整が必要な場合があります。
+リンクが見つからない場合は [info]/[warn] でログに出すので、サイト構造が変わった
+場合や年度未掲載の場合はそこで気づけます。
 
 負荷をかけすぎないよう --delay（既定1.5秒）で間隔を空けて順番にアクセスします。
 並列アクセスやアクセス元の偽装（IPローテーション等)は行いません。
@@ -83,94 +84,49 @@ def ext_from_content_type(ct, fallback=".pdf"):
     return {"application/pdf": ".pdf", "text/html": ".html"}.get(ct, fallback)
 
 
-PDF_HREF_RE = re.compile(r'href="([^"]+\.pdf)"', re.IGNORECASE)
-
-
-def _collect_pdf_links(html_bytes, page_url):
-    text = html_bytes.decode("utf-8", "ignore")
-    links = {urllib.parse.urljoin(page_url, m.group(1)) for m in PDF_HREF_RE.finditer(text)}
-    return links, text
-
-
-def _save_pdf_link(link, name, subdir, out_dir, delay, referer):
-    data, _, ct = fetch(link, delay=delay, referer=referer)
-    time.sleep(delay)
-    if not data:
-        return
-    fname = os.path.basename(urllib.parse.urlparse(link).path) or "file.pdf"
-    if not fname.lower().endswith((".pdf", ".html")):
-        fname += ext_from_content_type(ct)
-    path = os.path.join(out_dir, name, subdir, fname)
-    if safe_write(path, data):
-        print(f"  [ok] {subdir} {fname}")
-    else:
-        print(f"  [skip] {subdir} {fname} (既存)")
-
-
-def _download_year_page(code, name, year, url, out_dir, delay):
-    html, _, _ = fetch(url, delay=delay, referer=f"{BASE_UNIV}/new_kakomon_db/university/{code}/subject/e/")
-    time.sleep(delay)
-    if not html:
-        return
-    pdf_links, text = _collect_pdf_links(html, url)
-    if pdf_links:
-        for link in sorted(pdf_links):
-            _save_pdf_link(link, name, str(year), out_dir, delay, referer=url)
-        return
-    # 直接PDFが無い場合は問題/解答/解説の個別ページを辿る
-    subpage_re = re.compile(r'href="([^"]*/(?:question|answer|commentary)/)"')
-    subpages = {urllib.parse.urljoin(url, h) for h in subpage_re.findall(text)}
-    if not subpages:
-        print(f"  [info] {year}: PDFリンクが見つかりません（サイト構造の変更や年度未掲載の可能性）")
-        return
-    for sp in sorted(subpages):
-        sdata, sfinal, sct = fetch(sp, delay=delay, referer=url)
+def download_university(code, name, years, out_dir, delay):
+    """大学別の年度ページ (/new_kakomon_db/university/{code}/{year}/) を年度ごとに取得し、
+    英語科目の問題/解答/解説リンク (exam id が e{code}{yy}NN の形式) を抜き出して保存する。
+    実際のページ (東京大学 2026年度で確認済み) は例えば
+    href="/new_kakomon_db/university/0l/2026/e0l261/question/" のような形で、
+    末尾が .pdf ではなく question/answer/commentary ディレクトリになっている
+    （このURLに直接GETするとPDFなどの実体が返る）。
+    """
+    print(f"=== {name} ({code}) ===")
+    referer = f"{BASE_UNIV}/new_kakomon_db/university/{code}/subject/e/"
+    for year in years:
+        url = f"{BASE_UNIV}/new_kakomon_db/university/{code}/{year}/"
+        html, _, _ = fetch(url, delay=delay, referer=referer)
         time.sleep(delay)
-        if not sdata:
+        if not html:
+            print(f"  [warn] {year}: ページ取得失敗 ({url})")
             continue
-        kind = sp.rstrip("/").split("/")[-1]
-        if sct and "pdf" in sct.lower():
-            fname = f"{sp.rstrip('/').split('/')[-2]}_{kind}.pdf"
+        text = html.decode("utf-8", "ignore")
+        yy = str(year)[-2:]
+        pattern = re.compile(
+            rf'href="(/new_kakomon_db/university/{re.escape(code)}/{year}/'
+            rf'e{re.escape(code)}{yy}\d+/(question|answer|commentary)/)"'
+        )
+        found = pattern.findall(text)
+        if not found:
+            print(f"  [info] {year}: 取得{len(text)}文字 / 英語リンク一致0件（サイト側の仕様変更やその年度未掲載の可能性）")
+            continue
+        seen = set()
+        for href, kind in found:
+            if href in seen:
+                continue
+            seen.add(href)
+            exam_id = href.strip("/").split("/")[-2]
+            data, _, ct = fetch(BASE_UNIV + href, delay=delay, referer=url)
+            time.sleep(delay)
+            if not data:
+                continue
+            fname = f"{exam_id}_{kind}{ext_from_content_type(ct)}"
             path = os.path.join(out_dir, name, str(year), fname)
-            if safe_write(path, sdata):
+            if safe_write(path, data):
                 print(f"  [ok] {year} {fname}")
             else:
                 print(f"  [skip] {year} {fname} (既存)")
-            continue
-        sub_links, _ = _collect_pdf_links(sdata, sp)
-        for link in sorted(sub_links):
-            _save_pdf_link(link, name, str(year), out_dir, delay, referer=sp)
-
-
-def download_university(code, name, years, out_dir, delay):
-    print(f"=== {name} ({code}) ===")
-    subject_url = f"{BASE_UNIV}/new_kakomon_db/university/{code}/subject/e/"
-    html, _, _ = fetch(subject_url, delay=delay, referer=BASE_UNIV)
-    time.sleep(delay)
-
-    handled_years = set()
-    if html:
-        pdf_links, text = _collect_pdf_links(html, subject_url)
-        for link in sorted(pdf_links):
-            _save_pdf_link(link, name, "英語科目まとめ", out_dir, delay, referer=subject_url)
-
-        year_link_re = re.compile(
-            rf'href="([^"]*/university/{re.escape(code)}/(20\d\d)/[^"]*)"'
-        )
-        for href, yr_str in year_link_re.findall(text):
-            yr = int(yr_str)
-            if yr not in years or yr in handled_years:
-                continue
-            _download_year_page(code, name, yr, urllib.parse.urljoin(subject_url, href), out_dir, delay)
-            handled_years.add(yr)
-    else:
-        print(f"  [warn] まとめページ取得失敗: {subject_url}")
-
-    for year in years:
-        if year in handled_years:
-            continue
-        url = f"{BASE_UNIV}/new_kakomon_db/university/{code}/{year}/"
-        _download_year_page(code, name, year, url, out_dir, delay)
 
 
 PDF_LINK_RE = re.compile(r'href="([^"]+\.pdf)"', re.IGNORECASE)
@@ -222,6 +178,9 @@ def _extract_and_save_pair(text, page_url, keyword, year, out_dir, delay):
             if safe_write(path, data):
                 print(f"  [ok] {fname}")
 
+    if not m and not m2:
+        print(f"  [info] {year} {keyword}: リンク一致0件（サイト側の仕様変更やその年度未掲載の可能性）")
+
 
 def download_kyotsutest(years, out_dir, delay):
     print("=== 共通テスト（英語） ===")
@@ -232,6 +191,7 @@ def download_kyotsutest(years, out_dir, delay):
         html, _, _ = fetch(url, delay=delay)
         time.sleep(delay)
         if not html:
+            print(f"  [warn] {year}: ページ取得失敗、または404 ({url})")
             continue
         text = html.decode("utf-8", "ignore")
         _extract_and_save_pair(text, url, "reading", year, out_dir, delay)
@@ -247,6 +207,7 @@ def download_center(years, out_dir, delay):
         html, _, _ = fetch(url, delay=delay)
         time.sleep(delay)
         if not html:
+            print(f"  [warn] {year}: ページ取得失敗、または404 ({url})")
             continue
         text = html.decode("utf-8", "ignore")
         _extract_and_save_pair(text, url, "eigo", year, out_dir, delay)
