@@ -22,14 +22,23 @@ import urllib.request
 import zipfile
 
 BASE = "https://www.toshin.com"
-UA = "Mozilla/5.0 (compatible; personal-study-archiver/1.0)"
+UA = (
+    "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+)
+HEADERS = {
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
+    "Referer": BASE + "/new_kakomon_db",
+}
 
 
 def fetch(url, timeout=20, retries=3, delay=1.5):
     last_err = None
     for attempt in range(1, retries + 1):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            req = urllib.request.Request(url, headers=HEADERS)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.read(), resp.geturl(), resp.headers.get("Content-Type", "")
         except urllib.error.HTTPError as e:
@@ -73,8 +82,12 @@ def download_university(code, name, years, out_dir, delay):
             rf'href="(/new_kakomon_db/university/{re.escape(code)}/{year}/'
             rf'e{re.escape(code)}{yy}\d+/(question|answer|commentary)/)"'
         )
+        found = pattern.findall(text)
+        if not found:
+            print(f"  [info] {year}: 取得{len(text)}文字 / 英語リンク一致0件（サイト側の仕様変更やブロックの可能性）")
+            continue
         seen = set()
-        for href, kind in pattern.findall(text):
+        for href, kind in found:
             if href in seen:
                 continue
             seen.add(href)
