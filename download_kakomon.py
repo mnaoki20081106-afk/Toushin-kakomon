@@ -12,6 +12,10 @@
 
 重要: 大学別の年度ページは東進WEB会員としてログインしていないと
 https://www.toshin.com/member/login にリダイレクトされ、0件になります。
+しかも toshin.com と toshin-kakomon.com はドメインが別なのでCookieが共有されず、
+事前にtoshin.comへログインしておくだけでは不十分です。そのため本スクリプトは
+保護されたページにアクセスしてログイン誘導された、その場でログイン処理を行い、
+同じページを取り直す方式にしています。
 --email であなたの東進WEB会員のメールアドレスを指定してください。
 パスワードは環境変数 TOSHIN_PASSWORD か、指定が無ければ実行時にその場で
 （画面に表示されず）入力を求めます。コマンドライン引数には書かないでください
@@ -56,42 +60,29 @@ HEADERS = {
 }
 
 # 大学別の年度ページは東進WEB会員ログインが必須（未ログインだと/member/loginへ302される）。
-# ログインセッションをCookieで維持するため、urlopenではなくこのopenerを使う。
+# toshin.com と toshin-kakomon.com はドメインが別なので、事前に/member/loginへ直接
+# ログインしておいても toshin-kakomon.com 側のセッションには反映されない。
+# なので「保護されたページに直接アクセスしてログインへ誘導されたら、その場でログインして
+# 同じページを取り直す」という、実際にブラウザで起きているのと同じ流れを毎回行う。
 COOKIE_JAR = http.cookiejar.CookieJar()
 OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(COOKIE_JAR))
+CREDENTIALS = {}  # main()で --email / パスワードをセットする
 
 
-def fetch(url, timeout=20, retries=3, delay=1.5, referer=None, data=None):
-    last_err = None
-    headers = dict(HEADERS)
-    if referer:
-        headers["Referer"] = referer
-    for attempt in range(1, retries + 1):
-        try:
-            req = urllib.request.Request(url, headers=headers, data=data)
-            with OPENER.open(req, timeout=timeout) as resp:
-                return resp.read(), resp.geturl(), resp.headers.get("Content-Type", "")
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                return None, url, None
-            last_err = e
-        except Exception as e:
-            last_err = e
-        time.sleep(delay * attempt)
-    print(f"  [warn] failed: {url} ({last_err})")
-    return None, url, None
+def _is_login_page(final_url, text):
+    return "/member/login" in final_url and "会員ログインページ" in text
 
 
-def login(email, password):
-    """東進WEB会員としてログインし、以降のfetch()にセッションCookieを乗せる。"""
-    html, _, _ = fetch(LOGIN_URL)
-    if not html:
-        print("[error] ログインページの取得に失敗しました。")
+def _do_login(login_page_text):
+    """既にログインページへ誘導された状態のCookieセッションで、そのままログインを試みる。"""
+    email = CREDENTIALS.get("email")
+    password = CREDENTIALS.get("password")
+    if not email or not password:
+        print("  [error] ログインが必要ですが --email が指定されていません。")
         return False
-    text = html.decode("utf-8", "ignore")
-    m = re.search(r'name="_csrfToken"[^>]*value="([^"]+)"', text)
+    m = re.search(r'name="_csrfToken"[^>]*value="([^"]+)"', login_page_text)
     if not m:
-        print("[error] CSRFトークンが見つかりませんでした（ログインページの構造が変わった可能性）。")
+        print("  [error] CSRFトークンが見つかりませんでした（ログインページの構造が変わった可能性）。")
         return False
     form = urllib.parse.urlencode({
         "_method": "POST",
@@ -109,13 +100,47 @@ def login(email, password):
             final_url = resp.geturl()
             body = resp.read().decode("utf-8", "ignore")
     except Exception as e:
-        print(f"[error] ログインリクエスト失敗: {e}")
+        print(f"  [error] ログインリクエスト失敗: {e}")
         return False
-    if "/member/login" in final_url and "会員ログインページ" in body:
-        print("[error] ログインに失敗しました。メールアドレス/パスワードを確認してください。")
+    if _is_login_page(final_url, body):
+        m2 = re.search(r'class="[^"]*(?:error|alert|flash)[^"]*"[^>]*>([^<]{1,200})', body)
+        detail = m2.group(1).strip() if m2 else "（エラーメッセージは見つからず。連続ログインでレート制限された可能性もあるので、少し時間を置いて再実行してみてください）"
+        print(f"  [error] ログインに失敗しました: {detail}")
         return False
-    print(f"[ok] ログイン成功（遷移先: {final_url}）")
+    print(f"  [ok] ログイン成功（遷移先: {final_url}）")
     return True
+
+
+def fetch(url, timeout=20, retries=3, delay=1.5, referer=None, data=None, allow_relogin=True):
+    last_err = None
+    headers = dict(HEADERS)
+    if referer:
+        headers["Referer"] = referer
+    for attempt in range(1, retries + 1):
+        try:
+            req = urllib.request.Request(url, headers=headers, data=data)
+            with OPENER.open(req, timeout=timeout) as resp:
+                final_url = resp.geturl()
+                body = resp.read()
+                ct = resp.headers.get("Content-Type", "")
+            if allow_relogin and data is None and CREDENTIALS.get("email"):
+                text = body.decode("utf-8", "ignore")
+                if _is_login_page(final_url, text):
+                    print(f"  [info] ログインが必要なページでした。再ログインして取り直します: {url}")
+                    if _do_login(text):
+                        return fetch(url, timeout=timeout, retries=retries, delay=delay,
+                                     referer=referer, data=data, allow_relogin=False)
+                    return None, url, None
+            return body, final_url, ct
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None, url, None
+            last_err = e
+        except Exception as e:
+            last_err = e
+        time.sleep(delay * attempt)
+    print(f"  [warn] failed: {url} ({last_err})")
+    return None, url, None
 
 
 def safe_write(path, data):
@@ -305,8 +330,10 @@ def main():
               "ログインしないと 0 件になります（--skip-kyotsu を付けずに共通テストだけ試すなら不要）。")
     if args.email:
         password = os.environ.get(args.password_env) or getpass.getpass("東進WEB会員のパスワード: ")
-        if not login(args.email, password):
-            return
+        CREDENTIALS["email"] = args.email
+        CREDENTIALS["password"] = password
+        # ログイン自体は行わず、保護されたページに実際にアクセスした瞬間に
+        # fetch() がその場でログインへ誘導→ログイン→取り直しを行う（毎回それが必要なサイト構造のため）。
 
     if not args.skip_universities:
         for schools in config.values():
