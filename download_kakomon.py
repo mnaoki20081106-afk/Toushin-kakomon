@@ -46,6 +46,8 @@ import urllib.parse
 import urllib.request
 import zipfile
 
+SCRIPT_VERSION = "2026-09-04-lazy-relogin"
+
 BASE = "https://www.toshin.com"
 BASE_UNIV = "https://www.toshin-kakomon.com"
 LOGIN_URL = f"{BASE}/member/login"
@@ -301,6 +303,7 @@ def make_zip(out_dir, zip_path):
 
 
 def main():
+    print(f"[download_kakomon.py] version: {SCRIPT_VERSION}")
     ap = argparse.ArgumentParser(description="東進過去問DB 英語過去問 一括ダウンロード (標準ライブラリのみ)")
     ap.add_argument("--config", default="universities.json")
     ap.add_argument("--out", default="downloads")
