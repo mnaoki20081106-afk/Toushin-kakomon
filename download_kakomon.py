@@ -20,6 +20,7 @@
     python3 download_kakomon.py                     # 直近20年ぶん全大学+共通テスト/センター試験
     python3 download_kakomon.py --years 10           # 直近10年ぶん
     python3 download_kakomon.py --only 東京 早稲田    # 大学名で絞り込み
+    python3 download_kakomon.py --group 旧帝大 TOCKY  # universities.jsonのグループ名で絞り込み
     python3 download_kakomon.py --skip-kyotsu         # 共通テスト/センター試験を除外
     python3 download_kakomon.py --skip-universities   # 共通テスト/センター試験のみ
 """
@@ -234,6 +235,7 @@ def main():
     ap.add_argument("--years", type=int, default=20, help="末尾からの年数（既定20）")
     ap.add_argument("--delay", type=float, default=1.5, help="リクエスト間隔・秒（既定1.5）")
     ap.add_argument("--only", nargs="*", help="大学名の一部で絞り込み（スペース区切りで複数可）")
+    ap.add_argument("--group", nargs="*", help="universities.jsonのグループ名で絞り込み（例: 旧帝大 TOCKY）")
     ap.add_argument("--skip-kyotsu", action="store_true", help="共通テスト/センター試験を除外")
     ap.add_argument("--skip-universities", action="store_true", help="大学個別過去問を除外")
     ap.add_argument("--zip", action="store_true", help="完了後にdownloadsフォルダをZIPにまとめる")
@@ -249,7 +251,9 @@ def main():
         config = json.load(f)
 
     if not args.skip_universities:
-        for schools in config.values():
+        for group_name, schools in config.items():
+            if args.group and group_name not in args.group:
+                continue
             for school in schools:
                 name, code = school["name"], school["code"]
                 if args.only and not any(q in name for q in args.only):

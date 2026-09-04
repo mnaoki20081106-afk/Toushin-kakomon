@@ -1,0 +1,51 @@
+name: 過去問ダウンロード
+
+on:
+  workflow_dispatch:
+    inputs:
+      years:
+        description: "末尾から何年分ダウンロードするか"
+        required: false
+        default: "20"
+      delay:
+        description: "リクエスト間隔（秒）"
+        required: false
+        default: "1.5"
+      only:
+        description: "大学名の一部で絞り込み（スペース区切り、テスト用。空なら各グループ全大学）"
+        required: false
+        default: ""
+
+jobs:
+  download:
+    strategy:
+      fail-fast: false
+      matrix:
+        group: ["旧帝大", "TOCKY", "早慶上理", "MARCH", "関関同立", "日東駒専"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: ダウンロード実行
+        run: |
+          python3 download_kakomon.py \
+            --group "${{ matrix.group }}" \
+            --years "${{ inputs.years }}" \
+            --delay "${{ inputs.delay }}" \
+            --skip-kyotsu \
+            --out downloads \
+            --zip --zip-only \
+            --zip-name "${{ matrix.group }}.zip" \
+            ${{ inputs.only != '' && format('--only {0}', inputs.only) || '' }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kakomon-${{ matrix.group }}
+          path: "${{ matrix.group }}.zip"
+          retention-days: 14
+          if-no-files-found: error
