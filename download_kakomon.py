@@ -22,6 +22,16 @@ https://www.toshin.com/member/login へログインしてから取得します
 （パスワードをコマンドライン引数にしないのは、シェル履歴やプロセス一覧に
 残らないようにするためです）。
 
+toshin.com（ログイン）と toshin-kakomon.com（過去問DB本体）はドメインが
+別で、単純なCookie使い回しだけではログイン状態が引き継がれないことを
+実機検証で確認したため、大学別過去問の取得はPlaywright（実ブラウザの
+Chromiumを自動操作）で行います。人がブラウザで操作するのと同じ手順
+（ログインフォーム送信→各ページへ遷移）をなぞるだけで、内部のSSO連携が
+どう動いていても正しく再現されます。事前に
+    pip install playwright && playwright install chromium
+が必要です（共通テスト/センター試験は従来どおりtoshin.comの公開ページを
+標準ライブラリのみで取得するので、大学別過去問を使わないなら不要です）。
+
 使い方:
     python3 download_kakomon.py                     # 直近20年ぶん全大学+共通テスト/センター試験
     python3 download_kakomon.py --years 10           # 直近10年ぶん
@@ -55,11 +65,9 @@ HEADERS = {
     "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
 }
 
-# ログインセッションのCookieを全リクエストで使い回すための共有opener。
+# 共通テスト/センター試験(toshin.comの公開ページ、ログイン不要)用の共有opener。
 COOKIE_JAR = http.cookiejar.CookieJar()
 OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(COOKIE_JAR))
-
-CSRF_RE = re.compile(r'name="_csrfToken"[^>]*value="([^"]+)"')
 
 
 def fetch(url, timeout=20, retries=3, delay=1.5, referer=None, data=None):
@@ -83,55 +91,32 @@ def fetch(url, timeout=20, retries=3, delay=1.5, referer=None, data=None):
     return None, url, None
 
 
-def login(email, password, delay):
-    """https://www.toshin.com/member/login へログインする。
-    CakePHP系のCSRFトークン方式で、ログインページのhidden inputに
-    埋め込まれた_csrfTokenをそのままPOSTで送り返す必要がある。
-    ログイン後、大学別過去問(toshin-kakomon.com、別ドメイン)が実際に
-    閲覧できるかは別ドメインのため保証されないので、直後に疎通確認を行う。
+def login_playwright(page, email, password, delay):
+    """https://www.toshin.com/member/login へ実ブラウザでログインする。
+    toshin.comとtoshin-kakomon.com(過去問DB本体)は別ドメインで、単純な
+    Cookie使い回しだけではログイン状態が引き継がれないことを実機検証で
+    確認済み。Playwrightで実際にフォーム送信・ページ遷移させることで、
+    サイト側がJSで行っている可能性のあるSSO連携もそのまま再現する。
     """
     print("=== ログイン ===")
-    html, _, _ = fetch(LOGIN_URL, delay=delay)
-    time.sleep(delay)
-    if not html:
-        print("  [error] ログインページの取得に失敗しました")
-        return False
-    text = html.decode("utf-8", "ignore")
-    m = CSRF_RE.search(text)
-    if not m:
-        print("  [error] _csrfTokenが見つかりません（サイト側の仕様変更の可能性）")
-        return False
-    form_data = urllib.parse.urlencode(
-        {
-            "_method": "POST",
-            "_csrfToken": m.group(1),
-            "email": email,
-            "password": password,
-            "remember_me": "0",
-        }
-    ).encode()
-    html, final_url, _ = fetch(LOGIN_URL, delay=delay, referer=LOGIN_URL, data=form_data)
-    time.sleep(delay)
-    if not html:
-        print("  [error] ログインリクエストに失敗しました")
-        return False
-    if final_url and "/member/login" in final_url:
-        print(f"  [error] ログインに失敗した可能性があります（リダイレクト先: {final_url}）。"
+    page.goto(LOGIN_URL, wait_until="networkidle")
+    page.fill('input[name="email"]', email)
+    page.fill('input[name="password"]', password)
+    page.click('input.btn-login[type="submit"]')
+    page.wait_for_load_state("networkidle")
+    if "/member/login" in page.url:
+        print(f"  [error] ログインに失敗した可能性があります（現在のURL: {page.url}）。"
               f"メールアドレス/パスワードを確認してください。")
         return False
 
-    check_url_target = f"{BASE_UNIV}/new_kakomon_db/university/0l/2026/"
-    check_html, check_url, _ = fetch(check_url_target, delay=delay)
     time.sleep(delay)
-    # ドメインごとリダイレクトされていないか（toshin.com側の会員ページに飛ばされていないか）も含めて確認する。
-    # 単に"/member/login"を含まないかだけでは、会員トップ(/member/)などへのリダイレクトを見逃す。
-    if check_html and check_url and check_url.startswith(BASE_UNIV):
+    page.goto(f"{BASE_UNIV}/new_kakomon_db/university/0l/2026/", wait_until="networkidle")
+    if page.url.startswith(BASE_UNIV) and "/member" not in page.url:
         print("  [ok] ログイン成功（大学別過去問ページへのアクセスを確認）")
         return True
     print(
         f"  [error] toshin.comへのログインはできましたが、toshin-kakomon.com側では"
-        f"ログイン状態が引き継がれていないようです（リダイレクト先: {check_url}）。"
-        f"別ドメインのためセッションが連携されていない可能性があります。"
+        f"ログイン状態が引き継がれていないようです（現在のURL: {page.url}）。"
     )
     return False
 
@@ -152,24 +137,30 @@ def ext_from_content_type(ct, fallback=".pdf"):
     return {"application/pdf": ".pdf", "text/html": ".html"}.get(ct, fallback)
 
 
-def download_university(code, name, years, out_dir, delay):
-    """大学別の年度ページ (/new_kakomon_db/university/{code}/{year}/) を年度ごとに取得し、
-    英語科目の問題/解答/解説リンク (exam id が e{code}{yy}NN の形式) を抜き出して保存する。
+def download_university_pw(page, context, code, name, years, out_dir, delay):
+    """大学別の年度ページ (/new_kakomon_db/university/{code}/{year}/) を年度ごとに
+    ログイン済みのPlaywrightページで開き、英語科目の問題/解答/解説リンク
+    (exam id が e{code}{yy}NN の形式) を抜き出して保存する。
     実際のページ (東京大学 2026年度で確認済み) は例えば
     href="/new_kakomon_db/university/0l/2026/e0l261/question/" のような形で、
-    末尾が .pdf ではなく question/answer/commentary ディレクトリになっている
-    （このURLに直接GETするとPDFなどの実体が返る）。
+    末尾が .pdf ではなく question/answer/commentary ディレクトリになっている。
+    PDF本体のダウンロードは、ページ遷移せずに同じブラウザセッションのCookieを
+    引き継ぐ context.request で行う（新しいタブを開かずに済む）。
     """
     print(f"=== {name} ({code}) ===")
-    referer = f"{BASE_UNIV}/new_kakomon_db/university/{code}/subject/e/"
     for year in years:
         url = f"{BASE_UNIV}/new_kakomon_db/university/{code}/{year}/"
-        html, final_url, _ = fetch(url, delay=delay, referer=referer)
-        time.sleep(delay)
-        if not html:
-            print(f"  [warn] {year}: ページ取得失敗 ({url})")
+        try:
+            page.goto(url, wait_until="networkidle")
+        except Exception as e:
+            print(f"  [warn] {year}: ページ取得失敗 ({url}) ({e})")
+            time.sleep(delay)
             continue
-        text = html.decode("utf-8", "ignore")
+        time.sleep(delay)
+        if not page.url.startswith(BASE_UNIV):
+            print(f"  [warn] {year}: ログイン状態が外れた可能性があります（現在のURL: {page.url}）")
+            continue
+        text = page.content()
         yy = str(year)[-2:]
         pattern = re.compile(
             rf'href="(/new_kakomon_db/university/{re.escape(code)}/{year}/'
@@ -177,11 +168,10 @@ def download_university(code, name, years, out_dir, delay):
         )
         found = pattern.findall(text)
         if not found:
-            redirect_note = f" リダイレクト先: {final_url}" if final_url != url else ""
             snippet = re.sub(r"\s+", " ", text[:200]).strip()
             print(
                 f"  [info] {year}: 取得{len(text)}文字 / 英語リンク一致0件"
-                f"（サイト側の仕様変更やその年度未掲載の可能性）{redirect_note} 冒頭: {snippet!r}"
+                f"（サイト側の仕様変更やその年度未掲載の可能性） 冒頭: {snippet!r}"
             )
             continue
         seen = set()
@@ -190,10 +180,19 @@ def download_university(code, name, years, out_dir, delay):
                 continue
             seen.add(href)
             exam_id = href.strip("/").split("/")[-2]
-            data, _, ct = fetch(BASE_UNIV + href, delay=delay, referer=url)
-            time.sleep(delay)
-            if not data:
+            pdf_url = BASE_UNIV + href
+            try:
+                resp = context.request.get(pdf_url)
+            except Exception as e:
+                print(f"  [warn] {year} {exam_id}_{kind}: 取得失敗 ({e})")
+                time.sleep(delay)
                 continue
+            time.sleep(delay)
+            if not resp.ok:
+                print(f"  [warn] {year} {exam_id}_{kind}: HTTP {resp.status}")
+                continue
+            data = resp.body()
+            ct = resp.headers.get("content-type", "")
             fname = f"{exam_id}_{kind}{ext_from_content_type(ct)}"
             path = os.path.join(out_dir, name, str(year), fname)
             if safe_write(path, data):
@@ -331,17 +330,31 @@ def main():
                 "環境変数 TOSHIN_EMAIL / TOSHIN_PASSWORD を設定してください。"
             )
             return
-        if not login(email, password, args.delay):
-            print("[error] ログインに失敗したため中断します。")
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            print(
+                "[error] playwrightがインストールされていません。"
+                "`pip install playwright && playwright install chromium` を実行してください。"
+            )
             return
-        for group_name, schools in config.items():
-            if args.group and group_name not in args.group:
-                continue
-            for school in schools:
-                name, code = school["name"], school["code"]
-                if args.only and not any(q in name for q in args.only):
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            browser_context = browser.new_context(user_agent=UA)
+            page = browser_context.new_page()
+            if not login_playwright(page, email, password, args.delay):
+                print("[error] ログインに失敗したため中断します。")
+                browser.close()
+                return
+            for group_name, schools in config.items():
+                if args.group and group_name not in args.group:
                     continue
-                download_university(code, name, years, args.out, args.delay)
+                for school in schools:
+                    name, code = school["name"], school["code"]
+                    if args.only and not any(q in name for q in args.only):
+                        continue
+                    download_university_pw(page, browser_context, code, name, years, args.out, args.delay)
+            browser.close()
 
     if not args.skip_kyotsu:
         download_kyotsutest(years, args.out, args.delay)
