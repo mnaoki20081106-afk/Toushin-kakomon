@@ -97,7 +97,7 @@ def download_university(code, name, years, out_dir, delay):
     referer = f"{BASE_UNIV}/new_kakomon_db/university/{code}/subject/e/"
     for year in years:
         url = f"{BASE_UNIV}/new_kakomon_db/university/{code}/{year}/"
-        html, _, _ = fetch(url, delay=delay, referer=referer)
+        html, final_url, _ = fetch(url, delay=delay, referer=referer)
         time.sleep(delay)
         if not html:
             print(f"  [warn] {year}: ページ取得失敗 ({url})")
@@ -110,7 +110,12 @@ def download_university(code, name, years, out_dir, delay):
         )
         found = pattern.findall(text)
         if not found:
-            print(f"  [info] {year}: 取得{len(text)}文字 / 英語リンク一致0件（サイト側の仕様変更やその年度未掲載の可能性）")
+            redirect_note = f" リダイレクト先: {final_url}" if final_url != url else ""
+            snippet = re.sub(r"\s+", " ", text[:200]).strip()
+            print(
+                f"  [info] {year}: 取得{len(text)}文字 / 英語リンク一致0件"
+                f"（サイト側の仕様変更やその年度未掲載の可能性）{redirect_note} 冒頭: {snippet!r}"
+            )
             continue
         seen = set()
         for href, kind in found:
@@ -269,8 +274,11 @@ def main():
         make_zip(args.out, zip_path)
         if args.zip_only:
             import shutil
-            shutil.rmtree(args.out)
-            print(f"元フォルダを削除しました: {args.out}")
+            if os.path.isdir(args.out):
+                shutil.rmtree(args.out)
+                print(f"元フォルダを削除しました: {args.out}")
+            else:
+                print(f"元フォルダ({args.out})は生成されなかった（保存0件）ため削除をスキップしました。")
 
     print("完了しました。")
 
