@@ -19,6 +19,11 @@ on:
         description: "大学名の一部で絞り込み（スペース区切り、テスト用。空なら選択グループの全大学）"
         required: false
         default: ""
+      include_kyotsu:
+        description: "共通テスト/センター試験（ログイン不要、toshin.comの公開ページ）も取得するか"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   prepare:
@@ -88,5 +93,36 @@ jobs:
         with:
           name: kakomon-${{ matrix.group }}
           path: "${{ matrix.group }}.zip"
+          retention-days: 14
+          if-no-files-found: error
+
+  kyotsu:
+    if: ${{ inputs.include_kyotsu }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: ダウンロード実行（共通テスト・センター試験）
+        env:
+          YEARS: ${{ inputs.years }}
+          DELAY: ${{ inputs.delay }}
+        run: |
+          python3 download_kakomon.py \
+            --skip-universities \
+            --years "$YEARS" \
+            --delay "$DELAY" \
+            --out downloads \
+            --zip --zip-only \
+            --zip-name "kyotsu.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kakomon-共通テスト・センター試験
+          path: "kyotsu.zip"
           retention-days: 14
           if-no-files-found: error
