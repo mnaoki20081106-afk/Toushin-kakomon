@@ -98,19 +98,23 @@ def login_playwright(page, email, password, delay):
     確認済み。Playwrightで実際にフォーム送信・ページ遷移させることで、
     サイト側がJSで行っている可能性のあるSSO連携もそのまま再現する。
     """
+    # 広告/計測タグが常時通信し続けるページなので、networkidleは待っても
+    # 到達しない（実際にタイムアウトした）。domcontentloaded + 要素待ちに
+    # する。
     print("=== ログイン ===")
-    page.goto(LOGIN_URL, wait_until="networkidle")
+    page.goto(LOGIN_URL, wait_until="domcontentloaded")
+    page.wait_for_selector('input[name="email"]', timeout=30000)
     page.fill('input[name="email"]', email)
     page.fill('input[name="password"]', password)
     page.click('input.btn-login[type="submit"]')
-    page.wait_for_load_state("networkidle")
+    page.wait_for_load_state("domcontentloaded")
     if "/member/login" in page.url:
         print(f"  [error] ログインに失敗した可能性があります（現在のURL: {page.url}）。"
               f"メールアドレス/パスワードを確認してください。")
         return False
 
     time.sleep(delay)
-    page.goto(f"{BASE_UNIV}/new_kakomon_db/university/0l/2026/", wait_until="networkidle")
+    page.goto(f"{BASE_UNIV}/new_kakomon_db/university/0l/2026/", wait_until="domcontentloaded")
     if page.url.startswith(BASE_UNIV) and "/member" not in page.url:
         print("  [ok] ログイン成功（大学別過去問ページへのアクセスを確認）")
         return True
@@ -151,7 +155,7 @@ def download_university_pw(page, context, code, name, years, out_dir, delay):
     for year in years:
         url = f"{BASE_UNIV}/new_kakomon_db/university/{code}/{year}/"
         try:
-            page.goto(url, wait_until="networkidle")
+            page.goto(url, wait_until="domcontentloaded")
         except Exception as e:
             print(f"  [warn] {year}: ページ取得失敗 ({url}) ({e})")
             time.sleep(delay)
