@@ -3,6 +3,10 @@ name: 過去問ダウンロード
 on:
   workflow_dispatch:
     inputs:
+      groups:
+        description: "実行する大学群名（スペース区切り。空なら6グループ全部）例: MARCH  または  旧帝大 TOCKY"
+        required: false
+        default: ""
       years:
         description: "末尾から何年分ダウンロードするか"
         required: false
@@ -12,16 +16,41 @@ on:
         required: false
         default: "1.5"
       only:
-        description: "大学名の一部で絞り込み（スペース区切り、テスト用。空なら各グループ全大学）"
+        description: "大学名の一部で絞り込み（スペース区切り、テスト用。空なら選択グループの全大学）"
         required: false
         default: ""
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      groups: ${{ steps.set.outputs.groups }}
+    steps:
+      - id: set
+        env:
+          INPUT_GROUPS: ${{ inputs.groups }}
+        run: |
+          valid="旧帝大 TOCKY 早慶上理 MARCH 関関同立 日東駒専"
+          if [ -z "$INPUT_GROUPS" ]; then
+            groups="$valid"
+          else
+            groups="$INPUT_GROUPS"
+            for g in $groups; do
+              case " $valid " in
+                *" $g "*) ;;
+                *) echo "::error::未知のグループ名です: $g (有効な値: $valid)"; exit 1 ;;
+              esac
+            done
+          fi
+          json=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1].split(), ensure_ascii=False))" "$groups")
+          echo "groups=$json" >> "$GITHUB_OUTPUT"
+
   download:
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
-        group: ["旧帝大", "TOCKY", "早慶上理", "MARCH", "関関同立", "日東駒専"]
+        group: ${{ fromJson(needs.prepare.outputs.groups) }}
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
@@ -32,16 +61,21 @@ jobs:
           python-version: "3.x"
 
       - name: ダウンロード実行
+        env:
+          GROUP: ${{ matrix.group }}
+          YEARS: ${{ inputs.years }}
+          DELAY: ${{ inputs.delay }}
+          ONLY: ${{ inputs.only }}
         run: |
           python3 download_kakomon.py \
-            --group "${{ matrix.group }}" \
-            --years "${{ inputs.years }}" \
-            --delay "${{ inputs.delay }}" \
+            --group "$GROUP" \
+            --years "$YEARS" \
+            --delay "$DELAY" \
             --skip-kyotsu \
             --out downloads \
             --zip --zip-only \
-            --zip-name "${{ matrix.group }}.zip" \
-            ${{ inputs.only != '' && format('--only {0}', inputs.only) || '' }}
+            --zip-name "$GROUP.zip" \
+            ${ONLY:+--only $ONLY}
 
       - uses: actions/upload-artifact@v4
         with:
