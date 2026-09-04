@@ -6,8 +6,8 @@
 
 大学別過去問は toshin-kakomon.com の年度別ページ
 (/new_kakomon_db/university/{code}/{year}/) を年度ごとに取得し、
-英語科目のexam id (e{code}{年の下2桁}NN) を持つ問題/解答/解説リンクを抜き出して
-保存します（東京大学2026年度の実HTMLで構造を確認済み）。
+英語科目のexam id (e{code}{年の下2桁}NN) を持つ問題PDFのリンクを抜き出して
+保存します（解答・講評は対象外。東京大学2026年度の実HTMLで構造を確認済み）。
 共通テスト/センター試験は従来どおり toshin.com を参照します。
 
 リンクが見つからない場合は [info]/[warn] でログに出すので、サイト構造が変わった
@@ -151,32 +151,44 @@ def ext_from_content_type(ct, fallback=".pdf"):
 
 def download_university_pw(page, context, code, name, years, out_dir, delay):
     """大学別の年度ページ (/new_kakomon_db/university/{code}/{year}/) を年度ごとに
-    ログイン済みのPlaywrightページで開き、英語科目の問題/解答/解説リンク
-    (exam id が e{code}{yy}NN の形式) を抜き出して保存する。
+    ログイン済みのPlaywrightページで開き、英語科目の問題PDFのリンク
+    (exam id が e{code}{yy}NN の形式) を抜き出して保存する（解答・講評は対象外）。
     実際のページ (東京大学 2026年度で確認済み) は例えば
     href="/new_kakomon_db/university/0l/2026/e0l261/question/" のような形で、
-    末尾が .pdf ではなく question/answer/commentary ディレクトリになっている。
+    末尾が .pdf ではなく question ディレクトリになっている。
     PDF本体のダウンロードは、ページ遷移せずに同じブラウザセッションのCookieを
     引き継ぐ context.request で行う（新しいタブを開かずに済む）。
     """
     print(f"=== {name} ({code}) ===")
     for year in years:
         url = f"{BASE_UNIV}/new_kakomon_db/university/{code}/{year}/"
-        try:
-            page.goto(url, wait_until="domcontentloaded")
-        except Exception as e:
-            print(f"  [warn] {year}: ページ取得失敗 ({url}) ({e})")
+        text = None
+        last_err = None
+        for attempt in range(1, 4):
+            try:
+                page.goto(url, wait_until="domcontentloaded")
+            except Exception as e:
+                last_err = e
+                time.sleep(delay * attempt)
+                continue
             time.sleep(delay)
+            # toshin.com/err/error.php等、一時的なエラーページに飛ばされることがある。
+            # ログイン切れではなく単発のサイト側エラーのことが多いので、あきらめる前に
+            # 少し待ってリトライする。
+            if not page.url.startswith(BASE_UNIV):
+                last_err = f"想定外のURLへ遷移: {page.url}"
+                time.sleep(delay * attempt)
+                continue
+            text = page.content()
+            break
+        if text is None:
+            print(f"  [warn] {year}: ページ取得失敗（3回リトライ後もあきらめました） ({last_err})")
             continue
-        time.sleep(delay)
-        if not page.url.startswith(BASE_UNIV):
-            print(f"  [warn] {year}: ログイン状態が外れた可能性があります（現在のURL: {page.url}）")
-            continue
-        text = page.content()
         yy = str(year)[-2:]
+        # 問題PDFのみ対象（解答・講評は取得しない）。
         pattern = re.compile(
             rf'href="(/new_kakomon_db/university/{re.escape(code)}/{year}/'
-            rf'e{re.escape(code)}{yy}\d+/(question|answer|commentary)/)"'
+            rf'e{re.escape(code)}{yy}\d+/(question)/)"'
         )
         found = pattern.findall(text)
         if not found:
@@ -193,15 +205,24 @@ def download_university_pw(page, context, code, name, years, out_dir, delay):
             seen.add(href)
             exam_id = href.strip("/").split("/")[-2]
             pdf_url = BASE_UNIV + href
-            try:
-                resp = context.request.get(pdf_url)
-            except Exception as e:
-                print(f"  [warn] {year} {exam_id}_{kind}: 取得失敗 ({e})")
+            resp = None
+            last_err = None
+            for attempt in range(1, 4):
+                try:
+                    resp = context.request.get(pdf_url)
+                except Exception as e:
+                    last_err = e
+                    resp = None
+                    time.sleep(delay * attempt)
+                    continue
                 time.sleep(delay)
-                continue
-            time.sleep(delay)
-            if not resp.ok:
-                print(f"  [warn] {year} {exam_id}_{kind}: HTTP {resp.status}")
+                if resp.ok:
+                    break
+                last_err = f"HTTP {resp.status}"
+                resp = None
+                time.sleep(delay * attempt)
+            if resp is None:
+                print(f"  [warn] {year} {exam_id}_{kind}: 取得失敗（3回リトライ後もあきらめました） ({last_err})")
                 continue
             data = resp.body()
             ct = resp.headers.get("content-type", "")
@@ -239,31 +260,19 @@ def resolve_question_pdf(question_url, delay):
 
 
 def _extract_and_save_pair(text, page_url, keyword, year, out_dir, delay):
+    """問題PDFのみ保存する（講評は対象外）。"""
     q_pattern = re.compile(rf'href="([^"]*{keyword}[^"]*(?:mondai|question)[^"]*\.html)"')
     m = q_pattern.search(text)
-    if m:
-        qurl = urllib.parse.urljoin(page_url, m.group(1))
-        data, ext = resolve_question_pdf(qurl, delay)
-        if data:
-            fname = f"{year}_{keyword}_question{ext}"
-            path = os.path.join(out_dir, "共通テスト・センター試験", fname)
-            if safe_write(path, data):
-                print(f"  [ok] {fname}")
-
-    k_pattern = re.compile(rf'href="([^"]*{keyword}[^"]*\.pdf)"')
-    m2 = k_pattern.search(text)
-    if m2:
-        kurl = urllib.parse.urljoin(page_url, m2.group(1))
-        data, _, _ = fetch(kurl, delay=delay)
-        time.sleep(delay)
-        if data:
-            fname = f"{year}_{keyword}_commentary.pdf"
-            path = os.path.join(out_dir, "共通テスト・センター試験", fname)
-            if safe_write(path, data):
-                print(f"  [ok] {fname}")
-
-    if not m and not m2:
+    if not m:
         print(f"  [info] {year} {keyword}: リンク一致0件（サイト側の仕様変更やその年度未掲載の可能性）")
+        return
+    qurl = urllib.parse.urljoin(page_url, m.group(1))
+    data, ext = resolve_question_pdf(qurl, delay)
+    if data:
+        fname = f"{year}_{keyword}_question{ext}"
+        path = os.path.join(out_dir, "共通テスト・センター試験", fname)
+        if safe_write(path, data):
+            print(f"  [ok] {fname}")
 
 
 def download_kyotsutest(years, out_dir, delay):
