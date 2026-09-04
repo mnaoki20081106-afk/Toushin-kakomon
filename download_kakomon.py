@@ -120,9 +120,12 @@ def login(email, password, delay):
               f"メールアドレス/パスワードを確認してください。")
         return False
 
-    check_html, check_url, _ = fetch(f"{BASE_UNIV}/new_kakomon_db/university/0l/2026/", delay=delay)
+    check_url_target = f"{BASE_UNIV}/new_kakomon_db/university/0l/2026/"
+    check_html, check_url, _ = fetch(check_url_target, delay=delay)
     time.sleep(delay)
-    if check_html and (not check_url or "/member/login" not in check_url):
+    # ドメインごとリダイレクトされていないか（toshin.com側の会員ページに飛ばされていないか）も含めて確認する。
+    # 単に"/member/login"を含まないかだけでは、会員トップ(/member/)などへのリダイレクトを見逃す。
+    if check_html and check_url and check_url.startswith(BASE_UNIV):
         print("  [ok] ログイン成功（大学別過去問ページへのアクセスを確認）")
         return True
     print(
