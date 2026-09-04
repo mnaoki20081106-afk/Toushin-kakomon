@@ -10,6 +10,13 @@
 保存します（東京大学2026年度の実HTMLで構造を確認済み）。
 共通テスト/センター試験は従来どおり toshin.com を参照します。
 
+重要: 大学別の年度ページは東進WEB会員としてログインしていないと
+https://www.toshin.com/member/login にリダイレクトされ、0件になります。
+--email であなたの東進WEB会員のメールアドレスを指定してください。
+パスワードは環境変数 TOSHIN_PASSWORD か、指定が無ければ実行時にその場で
+（画面に表示されず）入力を求めます。コマンドライン引数には書かないでください
+（シェル履歴に残ります）。
+
 リンクが見つからない場合は [info]/[warn] でログに出すので、サイト構造が変わった
 場合や年度未掲載の場合はそこで気づけます。
 
@@ -17,14 +24,15 @@
 並列アクセスやアクセス元の偽装（IPローテーション等)は行いません。
 
 使い方:
-    python3 download_kakomon.py                     # 直近20年ぶん全大学+共通テスト/センター試験
-    python3 download_kakomon.py --years 10           # 直近10年ぶん
-    python3 download_kakomon.py --only 東京 早稲田    # 大学名で絞り込み
-    python3 download_kakomon.py --skip-kyotsu         # 共通テスト/センター試験を除外
-    python3 download_kakomon.py --skip-universities   # 共通テスト/センター試験のみ
+    python3 download_kakomon.py --email you@example.com              # ログインして直近20年ぶん取得
+    python3 download_kakomon.py --email you@example.com --years 10   # 直近10年ぶん
+    python3 download_kakomon.py --email you@example.com --only 東京 早稲田
+    python3 download_kakomon.py --skip-universities                  # ログイン不要（共通テスト/センターのみ）
 """
 import argparse
 import datetime
+import getpass
+import http.cookiejar
 import json
 import os
 import re
@@ -36,6 +44,7 @@ import zipfile
 
 BASE = "https://www.toshin.com"
 BASE_UNIV = "https://www.toshin-kakomon.com"
+LOGIN_URL = f"{BASE}/member/login"
 UA = (
     "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
@@ -46,16 +55,21 @@ HEADERS = {
     "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
 }
 
+# 大学別の年度ページは東進WEB会員ログインが必須（未ログインだと/member/loginへ302される）。
+# ログインセッションをCookieで維持するため、urlopenではなくこのopenerを使う。
+COOKIE_JAR = http.cookiejar.CookieJar()
+OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(COOKIE_JAR))
 
-def fetch(url, timeout=20, retries=3, delay=1.5, referer=None):
+
+def fetch(url, timeout=20, retries=3, delay=1.5, referer=None, data=None):
     last_err = None
     headers = dict(HEADERS)
     if referer:
         headers["Referer"] = referer
     for attempt in range(1, retries + 1):
         try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            req = urllib.request.Request(url, headers=headers, data=data)
+            with OPENER.open(req, timeout=timeout) as resp:
                 return resp.read(), resp.geturl(), resp.headers.get("Content-Type", "")
         except urllib.error.HTTPError as e:
             if e.code == 404:
@@ -66,6 +80,42 @@ def fetch(url, timeout=20, retries=3, delay=1.5, referer=None):
         time.sleep(delay * attempt)
     print(f"  [warn] failed: {url} ({last_err})")
     return None, url, None
+
+
+def login(email, password):
+    """東進WEB会員としてログインし、以降のfetch()にセッションCookieを乗せる。"""
+    html, _, _ = fetch(LOGIN_URL)
+    if not html:
+        print("[error] ログインページの取得に失敗しました。")
+        return False
+    text = html.decode("utf-8", "ignore")
+    m = re.search(r'name="_csrfToken"[^>]*value="([^"]+)"', text)
+    if not m:
+        print("[error] CSRFトークンが見つかりませんでした（ログインページの構造が変わった可能性）。")
+        return False
+    form = urllib.parse.urlencode({
+        "_method": "POST",
+        "_csrfToken": m.group(1),
+        "email": email,
+        "password": password,
+        "remember_me": "0",
+    }).encode()
+    headers = dict(HEADERS)
+    headers["Referer"] = LOGIN_URL
+    headers["Content-Type"] = "application/x-www-form-urlencoded"
+    try:
+        req = urllib.request.Request(LOGIN_URL, data=form, headers=headers)
+        with OPENER.open(req, timeout=20) as resp:
+            final_url = resp.geturl()
+            body = resp.read().decode("utf-8", "ignore")
+    except Exception as e:
+        print(f"[error] ログインリクエスト失敗: {e}")
+        return False
+    if "/member/login" in final_url and "会員ログインページ" in body:
+        print("[error] ログインに失敗しました。メールアドレス/パスワードを確認してください。")
+        return False
+    print(f"[ok] ログイン成功（遷移先: {final_url}）")
+    return True
 
 
 def safe_write(path, data):
@@ -239,6 +289,8 @@ def main():
     ap.add_argument("--zip", action="store_true", help="完了後にdownloadsフォルダをZIPにまとめる")
     ap.add_argument("--zip-name", default=None, help="ZIPファイル名（既定: <out>.zip）")
     ap.add_argument("--zip-only", action="store_true", help="ZIP化後に元のフォルダを削除してZIPだけ残す")
+    ap.add_argument("--email", default=None, help="東進WEB会員のログインID（メールアドレス）。大学別過去問の年度ページ閲覧にはログインが必須")
+    ap.add_argument("--password-env", default="TOSHIN_PASSWORD", help="パスワードを渡す環境変数名（既定: TOSHIN_PASSWORD）。未設定なら実行時にその場で入力を求める（画面には表示されません）")
     args = ap.parse_args()
 
     end_year = args.end_year or datetime.date.today().year
@@ -247,6 +299,14 @@ def main():
 
     with open(args.config, encoding="utf-8") as f:
         config = json.load(f)
+
+    if not args.skip_universities and not args.email:
+        print("[warn] --email が未指定です。大学別の年度ページはログイン必須のため、"
+              "ログインしないと 0 件になります（--skip-kyotsu を付けずに共通テストだけ試すなら不要）。")
+    if args.email:
+        password = os.environ.get(args.password_env) or getpass.getpass("東進WEB会員のパスワード: ")
+        if not login(args.email, password):
+            return
 
     if not args.skip_universities:
         for schools in config.values():
