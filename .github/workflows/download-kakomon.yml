@@ -60,6 +60,11 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Playwrightセットアップ
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
       - name: ダウンロード実行
         env:
           GROUP: ${{ matrix.group }}
