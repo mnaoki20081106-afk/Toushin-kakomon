@@ -66,6 +66,8 @@ jobs:
           YEARS: ${{ inputs.years }}
           DELAY: ${{ inputs.delay }}
           ONLY: ${{ inputs.only }}
+          TOSHIN_EMAIL: ${{ secrets.TOSHIN_EMAIL }}
+          TOSHIN_PASSWORD: ${{ secrets.TOSHIN_PASSWORD }}
         run: |
           python3 download_kakomon.py \
             --group "$GROUP" \

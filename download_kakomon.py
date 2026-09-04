@@ -16,6 +16,12 @@
 負荷をかけすぎないよう --delay（既定1.5秒）で間隔を空けて順番にアクセスします。
 並列アクセスやアクセス元の偽装（IPローテーション等)は行いません。
 
+大学別過去問（new_kakomon_db）の閲覧には東進会員ログインが必要です。環境変数
+TOSHIN_EMAIL / TOSHIN_PASSWORD にログイン情報を設定しておくと、実行時に
+https://www.toshin.com/member/login へログインしてから取得します
+（パスワードをコマンドライン引数にしないのは、シェル履歴やプロセス一覧に
+残らないようにするためです）。
+
 使い方:
     python3 download_kakomon.py                     # 直近20年ぶん全大学+共通テスト/センター試験
     python3 download_kakomon.py --years 10           # 直近10年ぶん
@@ -26,6 +32,7 @@
 """
 import argparse
 import datetime
+import http.cookiejar
 import json
 import os
 import re
@@ -37,6 +44,7 @@ import zipfile
 
 BASE = "https://www.toshin.com"
 BASE_UNIV = "https://www.toshin-kakomon.com"
+LOGIN_URL = f"{BASE}/member/login"
 UA = (
     "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
@@ -47,16 +55,22 @@ HEADERS = {
     "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
 }
 
+# ログインセッションのCookieを全リクエストで使い回すための共有opener。
+COOKIE_JAR = http.cookiejar.CookieJar()
+OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(COOKIE_JAR))
 
-def fetch(url, timeout=20, retries=3, delay=1.5, referer=None):
+CSRF_RE = re.compile(r'name="_csrfToken"[^>]*value="([^"]+)"')
+
+
+def fetch(url, timeout=20, retries=3, delay=1.5, referer=None, data=None):
     last_err = None
     headers = dict(HEADERS)
     if referer:
         headers["Referer"] = referer
     for attempt in range(1, retries + 1):
         try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            req = urllib.request.Request(url, headers=headers, data=data)
+            with OPENER.open(req, timeout=timeout) as resp:
                 return resp.read(), resp.geturl(), resp.headers.get("Content-Type", "")
         except urllib.error.HTTPError as e:
             if e.code == 404:
@@ -67,6 +81,56 @@ def fetch(url, timeout=20, retries=3, delay=1.5, referer=None):
         time.sleep(delay * attempt)
     print(f"  [warn] failed: {url} ({last_err})")
     return None, url, None
+
+
+def login(email, password, delay):
+    """https://www.toshin.com/member/login へログインする。
+    CakePHP系のCSRFトークン方式で、ログインページのhidden inputに
+    埋め込まれた_csrfTokenをそのままPOSTで送り返す必要がある。
+    ログイン後、大学別過去問(toshin-kakomon.com、別ドメイン)が実際に
+    閲覧できるかは別ドメインのため保証されないので、直後に疎通確認を行う。
+    """
+    print("=== ログイン ===")
+    html, _, _ = fetch(LOGIN_URL, delay=delay)
+    time.sleep(delay)
+    if not html:
+        print("  [error] ログインページの取得に失敗しました")
+        return False
+    text = html.decode("utf-8", "ignore")
+    m = CSRF_RE.search(text)
+    if not m:
+        print("  [error] _csrfTokenが見つかりません（サイト側の仕様変更の可能性）")
+        return False
+    form_data = urllib.parse.urlencode(
+        {
+            "_method": "POST",
+            "_csrfToken": m.group(1),
+            "email": email,
+            "password": password,
+            "remember_me": "0",
+        }
+    ).encode()
+    html, final_url, _ = fetch(LOGIN_URL, delay=delay, referer=LOGIN_URL, data=form_data)
+    time.sleep(delay)
+    if not html:
+        print("  [error] ログインリクエストに失敗しました")
+        return False
+    if final_url and "/member/login" in final_url:
+        print(f"  [error] ログインに失敗した可能性があります（リダイレクト先: {final_url}）。"
+              f"メールアドレス/パスワードを確認してください。")
+        return False
+
+    check_html, check_url, _ = fetch(f"{BASE_UNIV}/new_kakomon_db/university/0l/2026/", delay=delay)
+    time.sleep(delay)
+    if check_html and (not check_url or "/member/login" not in check_url):
+        print("  [ok] ログイン成功（大学別過去問ページへのアクセスを確認）")
+        return True
+    print(
+        f"  [error] toshin.comへのログインはできましたが、toshin-kakomon.com側では"
+        f"ログイン状態が引き継がれていないようです（リダイレクト先: {check_url}）。"
+        f"別ドメインのためセッションが連携されていない可能性があります。"
+    )
+    return False
 
 
 def safe_write(path, data):
@@ -256,6 +320,17 @@ def main():
         config = json.load(f)
 
     if not args.skip_universities:
+        email = os.environ.get("TOSHIN_EMAIL")
+        password = os.environ.get("TOSHIN_PASSWORD")
+        if not email or not password:
+            print(
+                "[error] 大学別過去問には東進会員ログインが必要です。"
+                "環境変数 TOSHIN_EMAIL / TOSHIN_PASSWORD を設定してください。"
+            )
+            return
+        if not login(email, password, args.delay):
+            print("[error] ログインに失敗したため中断します。")
+            return
         for group_name, schools in config.items():
             if args.group and group_name not in args.group:
                 continue
