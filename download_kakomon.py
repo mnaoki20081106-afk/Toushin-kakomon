@@ -2,13 +2,26 @@
 """東進過去問データベース 英語過去問 一括ダウンロードツール
 
 標準ライブラリのみで動作します（a-Shell などpipが使いにくい環境向け）。
-実行・ダウンロードは利用者自身の判断と責任で行ってください。
+実行・ダウンロードは利用者自身の判断と責任で行ってください（利用規約の範囲内で）。
+
+大学別過去問は toshin-kakomon.com の年度別ページ
+(/new_kakomon_db/university/{code}/{year}/) を年度ごとに取得し、
+英語科目のexam id (e{code}{年の下2桁}NN) を持つ問題/解答/解説リンクを抜き出して
+保存します（東京大学2026年度の実HTMLで構造を確認済み）。
+共通テスト/センター試験は従来どおり toshin.com を参照します。
+
+リンクが見つからない場合は [info]/[warn] でログに出すので、サイト構造が変わった
+場合や年度未掲載の場合はそこで気づけます。
+
+負荷をかけすぎないよう --delay（既定1.5秒）で間隔を空けて順番にアクセスします。
+並列アクセスやアクセス元の偽装（IPローテーション等)は行いません。
 
 使い方:
     python3 download_kakomon.py                     # 直近20年ぶん全大学+共通テスト/センター試験
     python3 download_kakomon.py --years 10           # 直近10年ぶん
     python3 download_kakomon.py --only 東京 早稲田    # 大学名で絞り込み
     python3 download_kakomon.py --skip-kyotsu         # 共通テスト/センター試験を除外
+    python3 download_kakomon.py --skip-universities   # 共通テスト/センター試験のみ
 """
 import argparse
 import datetime
@@ -22,6 +35,7 @@ import urllib.request
 import zipfile
 
 BASE = "https://www.toshin.com"
+BASE_UNIV = "https://www.toshin-kakomon.com"
 UA = (
     "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
@@ -30,15 +44,17 @@ HEADERS = {
     "User-Agent": UA,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
-    "Referer": BASE + "/new_kakomon_db",
 }
 
 
-def fetch(url, timeout=20, retries=3, delay=1.5):
+def fetch(url, timeout=20, retries=3, delay=1.5, referer=None):
     last_err = None
+    headers = dict(HEADERS)
+    if referer:
+        headers["Referer"] = referer
     for attempt in range(1, retries + 1):
         try:
-            req = urllib.request.Request(url, headers=HEADERS)
+            req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.read(), resp.geturl(), resp.headers.get("Content-Type", "")
         except urllib.error.HTTPError as e:
@@ -69,12 +85,21 @@ def ext_from_content_type(ct, fallback=".pdf"):
 
 
 def download_university(code, name, years, out_dir, delay):
+    """大学別の年度ページ (/new_kakomon_db/university/{code}/{year}/) を年度ごとに取得し、
+    英語科目の問題/解答/解説リンク (exam id が e{code}{yy}NN の形式) を抜き出して保存する。
+    実際のページ (東京大学 2026年度で確認済み) は例えば
+    href="/new_kakomon_db/university/0l/2026/e0l261/question/" のような形で、
+    末尾が .pdf ではなく question/answer/commentary ディレクトリになっている
+    （このURLに直接GETするとPDFなどの実体が返る）。
+    """
     print(f"=== {name} ({code}) ===")
+    referer = f"{BASE_UNIV}/new_kakomon_db/university/{code}/subject/e/"
     for year in years:
-        url = f"{BASE}/new_kakomon_db/university/{code}/{year}/"
-        html, _, _ = fetch(url, delay=delay)
+        url = f"{BASE_UNIV}/new_kakomon_db/university/{code}/{year}/"
+        html, _, _ = fetch(url, delay=delay, referer=referer)
         time.sleep(delay)
         if not html:
+            print(f"  [warn] {year}: ページ取得失敗 ({url})")
             continue
         text = html.decode("utf-8", "ignore")
         yy = str(year)[-2:]
@@ -84,7 +109,7 @@ def download_university(code, name, years, out_dir, delay):
         )
         found = pattern.findall(text)
         if not found:
-            print(f"  [info] {year}: 取得{len(text)}文字 / 英語リンク一致0件（サイト側の仕様変更やブロックの可能性）")
+            print(f"  [info] {year}: 取得{len(text)}文字 / 英語リンク一致0件（サイト側の仕様変更やその年度未掲載の可能性）")
             continue
         seen = set()
         for href, kind in found:
@@ -92,7 +117,7 @@ def download_university(code, name, years, out_dir, delay):
                 continue
             seen.add(href)
             exam_id = href.strip("/").split("/")[-2]
-            data, _, ct = fetch(BASE + href, delay=delay)
+            data, _, ct = fetch(BASE_UNIV + href, delay=delay, referer=url)
             time.sleep(delay)
             if not data:
                 continue
@@ -153,6 +178,9 @@ def _extract_and_save_pair(text, page_url, keyword, year, out_dir, delay):
             if safe_write(path, data):
                 print(f"  [ok] {fname}")
 
+    if not m and not m2:
+        print(f"  [info] {year} {keyword}: リンク一致0件（サイト側の仕様変更やその年度未掲載の可能性）")
+
 
 def download_kyotsutest(years, out_dir, delay):
     print("=== 共通テスト（英語） ===")
@@ -163,6 +191,7 @@ def download_kyotsutest(years, out_dir, delay):
         html, _, _ = fetch(url, delay=delay)
         time.sleep(delay)
         if not html:
+            print(f"  [warn] {year}: ページ取得失敗、または404 ({url})")
             continue
         text = html.decode("utf-8", "ignore")
         _extract_and_save_pair(text, url, "reading", year, out_dir, delay)
@@ -178,6 +207,7 @@ def download_center(years, out_dir, delay):
         html, _, _ = fetch(url, delay=delay)
         time.sleep(delay)
         if not html:
+            print(f"  [warn] {year}: ページ取得失敗、または404 ({url})")
             continue
         text = html.decode("utf-8", "ignore")
         _extract_and_save_pair(text, url, "eigo", year, out_dir, delay)
