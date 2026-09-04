@@ -113,6 +113,14 @@ def login_playwright(page, email, password, delay):
               f"メールアドレス/パスワードを確認してください。")
         return False
 
+    # 会員トップページの「大学入試問題過去問データベース」リンクは
+    # toshin-kakomon.comへ直接ではなく、まずtoshin.com側の
+    # /member/activate?service_id=1 を経由する（実HTMLで確認済み）。
+    # ここでtoshin-kakomon.com側のセッションが発行されるらしく、
+    # 直接目的のURLへgotoするだけでは連携されない。
+    time.sleep(delay)
+    page.goto(f"{BASE}/member/activate?service_id=1", wait_until="domcontentloaded")
+
     time.sleep(delay)
     page.goto(f"{BASE_UNIV}/new_kakomon_db/university/0l/2026/", wait_until="domcontentloaded")
     if page.url.startswith(BASE_UNIV) and "/member" not in page.url:
