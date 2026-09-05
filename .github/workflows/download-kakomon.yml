@@ -19,6 +19,10 @@ on:
         description: "大学名の一部で絞り込み（スペース区切り、テスト用。空なら選択グループの全大学。共通テストグループには無効）"
         required: false
         default: ""
+      drive_root_name:
+        description: "Googleドライブ上に作成するルートフォルダ名"
+        required: false
+        default: "過去問"
 
 jobs:
   prepare:
@@ -60,6 +64,9 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Google Drive APIクライアントのインストール
+        run: pip install google-api-python-client google-auth
+
       # 共通テスト/センター試験はログイン不要のtoshin.com公開ページなので
       # Playwright(ログイン用ブラウザ)は不要。大学グループの時だけ入れる。
       - name: Playwrightセットアップ
@@ -84,8 +91,6 @@ jobs:
             --delay "$DELAY" \
             --skip-kyotsu \
             --out downloads \
-            --zip --zip-only \
-            --zip-name "$GROUP.zip" \
             ${ONLY:+--only $ONLY}
 
       - name: ダウンロード実行（共通テスト・センター試験）
@@ -98,13 +103,17 @@ jobs:
             --skip-universities \
             --years "$YEARS" \
             --delay "$DELAY" \
-            --out downloads \
-            --zip --zip-only \
-            --zip-name "共通テスト.zip"
+            --out downloads
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: kakomon-${{ matrix.group }}
-          path: "${{ matrix.group }}.zip"
-          retention-days: 14
-          if-no-files-found: error
+      - name: Googleドライブへ直接アップロード
+        env:
+          GROUP: ${{ matrix.group }}
+          DRIVE_ROOT_NAME: ${{ inputs.drive_root_name }}
+          GDRIVE_SA_KEY: ${{ secrets.GDRIVE_SA_KEY }}
+          GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_ROOT_FOLDER_ID }}
+        run: |
+          python3 upload_to_drive.py \
+            --src downloads \
+            --group "$GROUP" \
+            --root-folder-id "$GDRIVE_ROOT_FOLDER_ID" \
+            --root-name "${DRIVE_ROOT_NAME:-過去問}"
